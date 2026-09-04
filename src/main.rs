@@ -1,9 +1,8 @@
 use macroquad::prelude::*;
 use nalgebra::Vector3;
-use std::collections::VecDeque;
 
 const G: f64 = 6.67430e-11; // 万有引力定数
-const STEP_PER_FRAME: i32 = 100; // 1フレームあたりのシミュレーションステップ数
+const FIXED_DT: f64 = 1.0 / 600.0; // 早送りでも物理計算の刻み幅は固定
 const STAR_MASS: f64 = 1.0e16;
 const ORBIT_RADIUS: f64 = 150.0;
 
@@ -337,77 +336,111 @@ fn draw_planet(planet: &Planet) {
     draw_text("Planet", x + 14.0, y - 8.0, 16.0, WHITE);
 }
 
-// 惑星から見た各恒星の方向を、全天図の円周上の座標へ変換する。
-fn sky_positions(planet: &Planet, stars: &[Star], center: Vec2, radius: f32) -> [Vec2; 3] {
-    std::array::from_fn(|index| {
-        let direction = stars[index].position - planet.position;
-        let direction_2d = vec2(direction.x as f32, direction.y as f32).normalize_or_zero();
-        center + direction_2d * radius
-    })
+// 北緯25度の観測者を仮定。自転軸は軌道面に垂直で、1日は60シミュレーション秒。
+// 地上に固定された東・北・天頂の基底へ恒星方向を変換する。
+fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
+    let latitude = 25.0_f64.to_radians();
+    let up = Vector3::new(
+        phase.cos() * latitude.cos(),
+        phase.sin() * latitude.cos(),
+        latitude.sin(),
+    );
+    let east = Vector3::new(-phase.sin(), phase.cos(), 0.0);
+    let north = up.cross(&east);
+    let unit = direction.try_normalize(1.0e-12).unwrap_or(Vector3::zeros());
+    (
+        unit.dot(&east).atan2(unit.dot(&north)),
+        unit.dot(&up).clamp(-1.0, 1.0).asin(),
+    )
 }
 
-fn draw_planet_sky(
-    planet: &Planet,
-    stars: &[Star],
-    history: &VecDeque<[Vec2; 3]>,
-    center: Vec2,
-    radius: f32,
-) {
-    // 右側を惑星の空として塗り直し、俯瞰図と明確に分ける。
-    draw_rectangle(
-        800.0,
-        0.0,
-        400.0,
-        700.0,
-        Color::new(0.015, 0.025, 0.08, 1.0),
-    );
-    draw_line(800.0, 0.0, 800.0, 700.0, 2.0, DARKGRAY);
-    draw_text("Sky from the planet", 830.0, 42.0, 28.0, WHITE);
-    draw_text("N", center.x - 6.0, center.y - radius - 15.0, 18.0, GRAY);
-    draw_text("E", center.x + radius + 8.0, center.y + 5.0, 18.0, GRAY);
-    draw_text("S", center.x - 6.0, center.y + radius + 25.0, 18.0, GRAY);
-    draw_text("W", center.x - radius - 25.0, center.y + 5.0, 18.0, GRAY);
-    draw_circle_lines(center.x, center.y, radius, 2.0, GRAY);
-    draw_circle(center.x, center.y, 6.0, BLUE);
-
-    // 過去の見かけ方向を薄い線で残し、惑星の空での移動を読めるようにする。
-    for star_index in 0..3 {
-        let mut samples = history.iter();
-        let Some(mut previous) = samples.next() else {
+// 地上から周囲360度を見渡したパノラマ。地平線より下の恒星は地面で隠す。
+// 軌道計算は2次元だが、観測地点の緯度と自転から空の高度を求める。
+fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
+    let w = screen_width();
+    let h = screen_height();
+    let horizon = h * 0.76;
+    let phase = -std::f64::consts::FRAC_PI_2 + time * std::f64::consts::TAU / 60.0;
+    let coordinates: Vec<_> = stars
+        .iter()
+        .map(|star| horizontal_coordinates(star.position - planet.position, phase))
+        .collect();
+    let daylight = coordinates
+        .iter()
+        .map(|(_, altitude)| (altitude.sin() * 3.0 + 0.15).clamp(0.0, 1.0))
+        .fold(0.0_f64, f64::max) as f32;
+    // 高度に応じた空のグラデーションと、地平線付近の霞。
+    for row in 0..100 {
+        let t = row as f32 / 100.0;
+        draw_rectangle(
+            0.0,
+            horizon * t,
+            w,
+            horizon / 100.0 + 1.0,
+            Color::new(
+                0.015 + daylight * (0.12 + t * 0.26),
+                0.02 + daylight * (0.25 + t * 0.23),
+                0.06 + daylight * (0.40 + t * 0.12),
+                1.0,
+            ),
+        );
+    }
+    for (star, (azimuth, altitude)) in stars.iter().zip(coordinates) {
+        let distance = (star.position - planet.position).norm().max(1.0);
+        let x = ((azimuth / std::f64::consts::TAU + 0.5) as f32) * w;
+        let y = horizon - (altitude / std::f64::consts::FRAC_PI_2) as f32 * (horizon - 100.0);
+        // 半径は演出用の恒星サイズ。角半径から画面サイズへ変換する。
+        let radius = ((star.radius / distance).atan() as f32 * (horizon - 100.0)
+            / std::f32::consts::FRAC_PI_2)
+            .clamp(2.0, 120.0);
+        if y - radius > horizon {
             continue;
-        };
-        for (age, current) in samples.enumerate() {
-            let alpha = 0.08 + 0.35 * age as f32 / history.len().max(1) as f32;
-            let color = Color::new(
-                stars[star_index].color.r,
-                stars[star_index].color.g,
-                stars[star_index].color.b,
-                alpha,
-            );
-            draw_line(
-                previous[star_index].x,
-                previous[star_index].y,
-                current[star_index].x,
-                current[star_index].y,
-                2.0,
-                color,
-            );
-            previous = current;
+        }
+        // パノラマの左右の継ぎ目でも太陽が途切れないよう複製する。
+        for wrap in [-w, 0.0, w] {
+            for layer in (1..=6).rev() {
+                draw_circle(
+                    x + wrap,
+                    y,
+                    radius * (1.0 + layer as f32 * 0.24),
+                    Color::new(star.color.r, star.color.g, star.color.b, 0.025),
+                );
+            }
+            draw_circle(x + wrap, y, radius, star.color);
+            draw_circle(x + wrap, y, radius * 0.72, Color::new(1.0, 0.96, 0.84, 0.9));
         }
     }
-
-    let positions = sky_positions(planet, stars, center, radius);
-    for (index, (star, position)) in stars.iter().zip(positions).enumerate() {
-        let distance = (star.position - planet.position).norm() as f32;
-        // 近い恒星ほど大きく見せる。実半径ではなく視認性を優先した表現。
-        let apparent_radius = (1800.0 / distance.max(1.0)).clamp(6.0, 28.0);
-        draw_circle(position.x, position.y, apparent_radius, star.color);
+    // 地面を最後に描くことで、日没中の太陽も地平線で正しく隠れる。
+    draw_rectangle(
+        0.0,
+        horizon,
+        w,
+        h - horizon,
+        Color::new(
+            0.04 + daylight * 0.13,
+            0.035 + daylight * 0.09,
+            0.03 + daylight * 0.055,
+            1.0,
+        ),
+    );
+    for i in 0..16 {
+        let x = i as f32 * w / 15.0;
+        draw_line(
+            w * 0.5,
+            horizon,
+            x,
+            h,
+            1.0,
+            Color::new(0.35, 0.27, 0.18, 0.18),
+        );
+    }
+    for (fraction, label) in [(0.0, "S"), (0.25, "W"), (0.5, "N"), (0.75, "E"), (1.0, "S")] {
         draw_text(
-            &format!("Star {}  d={:.0}", index + 1, distance),
-            830.0,
-            560.0 + index as f32 * 28.0,
+            label,
+            (fraction * w - 7.0).clamp(4.0, w - 18.0),
+            horizon + 25.0,
             20.0,
-            star.color,
+            LIGHTGRAY,
         );
     }
 }
@@ -440,6 +473,27 @@ fn draw_lagrange_points(points: &[LagrangePoint], primary: &Star, secondary: &St
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ground_projection_distinguishes_zenith_and_below_horizon() {
+        let latitude = 25.0_f64.to_radians();
+        let up = Vector3::new(latitude.cos(), 0.0, latitude.sin());
+        let (_, altitude) = horizontal_coordinates(up, 0.0);
+        assert!((altitude - std::f64::consts::FRAC_PI_2).abs() < 1.0e-7);
+        assert!(horizontal_coordinates(-up, 0.0).1 < 0.0);
+    }
+
+    #[test]
+    fn rotation_changes_sun_altitude() {
+        let direction = Vector3::new(1.0, 0.0, 0.0);
+        assert!(horizontal_coordinates(direction, 0.0).1 > 0.0);
+        assert!(horizontal_coordinates(direction, std::f64::consts::PI).1 < 0.0);
+    }
+}
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "ThreeBodyViewer".to_owned(),
@@ -454,8 +508,10 @@ async fn main() {
     let mut preset_index = 0;
     let mut preset = SimulationPresetFactory::create(preset_index);
     let mut planet = PlanetFactory::create(&preset.stars);
-    let mut sky_history: VecDeque<[Vec2; 3]> = VecDeque::new();
-    let mut history_timer = 0.0;
+    let mut simulation_time = 0.0;
+    let mut accumulator = 0.0;
+    let mut boost: f64 = 8.0;
+    let mut overview = false;
 
     loop {
         // 数字キー1〜9と0（10番）で、その場で別の初期値へリセットできる。
@@ -476,19 +532,35 @@ async fn main() {
                 preset_index = index;
                 preset = SimulationPresetFactory::create(preset_index);
                 planet = PlanetFactory::create(&preset.stars);
-                sky_history.clear();
-                history_timer = 0.0;
+                simulation_time = 0.0;
+                accumulator = 0.0;
             }
         }
 
-        let dt = get_frame_time();
-        let sub_dt = dt as f64 / STEP_PER_FRAME as f64;
+        if is_key_pressed(KeyCode::Up) {
+            boost = (boost * 2.0).min(32.0);
+        }
+        if is_key_pressed(KeyCode::Down) {
+            boost = (boost / 2.0).max(2.0);
+        }
+        if is_key_pressed(KeyCode::Tab) {
+            overview = !overview;
+        }
+        let speed = if is_key_down(KeyCode::Space) {
+            boost
+        } else {
+            1.0
+        };
+        accumulator += get_frame_time().min(0.1) as f64 * speed;
+        let sub_dt = FIXED_DT;
 
         clear_background(BLACK);
 
         {
             // シミュレート
-            for _ in 0..STEP_PER_FRAME {
+            while accumulator >= FIXED_DT {
+                accumulator -= FIXED_DT;
+                simulation_time += FIXED_DT;
                 let mut forces = vec![Vector3::new(0.0, 0.0, 0.0); preset.stars.len()];
 
                 // 万有引力の計算
@@ -521,22 +593,26 @@ async fn main() {
             draw_lagrange_points(&lagrange_points, &preset.stars[0], &preset.stars[1]);
         }
 
-        let sky_center = vec2(1000.0, 310.0);
-        let sky_radius = 145.0;
-        history_timer += dt;
-        if history_timer >= 0.08 {
-            sky_history.push_back(sky_positions(
-                &planet,
-                &preset.stars,
-                sky_center,
-                sky_radius,
-            ));
-            if sky_history.len() > 120 {
-                sky_history.pop_front();
-            }
-            history_timer = 0.0;
+        if !overview {
+            draw_ground_sky(&planet, &preset.stars, simulation_time);
         }
-        draw_planet_sky(&planet, &preset.stars, &sky_history, sky_center, sky_radius);
+        draw_rectangle(
+            0.0,
+            0.0,
+            screen_width(),
+            84.0,
+            Color::new(0.0, 0.0, 0.0, 0.6),
+        );
+        draw_text(
+            &format!(
+                "SPACE: hold to speed up | UP/DOWN: boost {:.0}x | TAB: ground / orbit | {:.0}x  t={:.1}s",
+                boost, speed, simulation_time
+            ),
+            10.0,
+            77.0,
+            19.0,
+            WHITE,
+        );
 
         draw_text(&format!("FPS: {}", get_fps()), 10.0, 30.0, 24.0, DARKGRAY);
         draw_text(
