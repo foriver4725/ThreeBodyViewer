@@ -25,7 +25,25 @@ python3 -m http.server 8080 --directory dist
 `dist/`内の3ファイルを静的ホスティングへ配置すれば公開できます。
 Wasmは`application/wasm`で配信してください。すべて相対パスのため、サブディレクトリへの配置にも対応します。
 ローダーはCargo.lockに固定されたmacroquadと同梱のものを使用し、外部CDNには依存しません。
-生成物の`dist/`はGit管理対象外です。公開先へのデプロイは別途行ってください。
+生成物の`dist/`はGit管理対象外です。
+
+### GitHub Pagesで公開
+
+初回のみリポジトリの Settings → Pages → Build and deployment → Source を
+「GitHub Actions」に設定してください。
+以後は`main`へのプッシュで、テスト・Wasmビルド・公開が自動実行されます。
+Actionsタブから手動実行もできます。
+
+公開先： https://foriver4725.github.io/ThreeBodyViewer/
+
+### ブラウザでの構成
+
+- `index.html`：シミュレーションの描画先となるキャンバス
+- `mq_js_bundle.js`：ブラウザの描画・入力とWasmをつなぐランタイム
+- `ThreeBodyViewer.wasm`：Rustからコンパイルされた計算・描画の本体
+
+GitHub Pagesはこの3ファイルを配るだけです。重力計算や描画は閲覧者のブラウザで動作し、
+計算用のバックエンドサーバーは不要です。
 
 ## ソース構成
 
