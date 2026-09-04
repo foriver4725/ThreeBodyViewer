@@ -355,10 +355,12 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
 }
 
 // 小説をモチーフにした視覚演出であり、実際の恒星大気の物理モデルではない。
-// 半径の25倍を境に、飛星から球へ瞬時に切り替える。
+// 通常の距離では飛星のまま、半径の8倍まで接近すると球へ瞬時に切り替える。
 // 境界の前後で混ぜないことが、この演出の要点。
+const SUN_REVEAL_RADIUS_MULTIPLIER: f64 = 8.0;
+
 fn gas_visibility(distance: f64, radius: f64) -> f32 {
-    if distance <= radius.max(1.0) * 25.0 {
+    if distance <= radius.max(1.0) * SUN_REVEAL_RADIUS_MULTIPLIER {
         1.0
     } else {
         0.0
@@ -707,9 +709,10 @@ mod tests {
 
     #[test]
     fn gas_layer_switches_abruptly_at_boundary() {
-        assert_eq!(gas_visibility(400.01, 16.0), 0.0);
-        assert_eq!(gas_visibility(400.0, 16.0), 1.0);
-        assert_eq!(gas_visibility(399.99, 16.0), 1.0);
+        assert_eq!(gas_visibility(200.0, 16.0), 0.0);
+        assert_eq!(gas_visibility(128.01, 16.0), 0.0);
+        assert_eq!(gas_visibility(128.0, 16.0), 1.0);
+        assert_eq!(gas_visibility(127.99, 16.0), 1.0);
     }
 
     #[test]
@@ -734,14 +737,14 @@ mod tests {
         let star = &mut preset.stars[0];
         star.position = Vector3::zeros();
         let mut planet = Planet {
-            position: Vector3::new(200.0, 0.0, 0.0),
+            position: Vector3::new(50.0, 0.0, 0.0),
             velocity: Vector3::zeros(),
         };
         let near = relative_heat(star, &planet);
-        assert!((near - 1.0).abs() < 1.0e-10);
-        planet.position.x = 400.0;
+        assert!((near - 16.0).abs() < 1.0e-10);
+        planet.position.x = 100.0;
         assert!((relative_heat(star, &planet) - near / 4.0).abs() < 1.0e-10);
-        planet.position.x = 400.01;
+        planet.position.x = 128.01;
         assert_eq!(relative_heat(star, &planet), 0.0);
         planet.position = Vector3::zeros();
         assert!(relative_heat(star, &planet).is_finite());
