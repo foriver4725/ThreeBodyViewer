@@ -1,5 +1,6 @@
 use macroquad::prelude::*;
 use nalgebra::Vector3;
+use std::collections::VecDeque;
 
 const G: f64 = 6.67430e-11; // 万有引力定数
 const STEP_PER_FRAME: i32 = 100; // 1フレームあたりのシミュレーションステップ数
@@ -13,6 +14,36 @@ struct Star {
     velocity: Vector3<f64>, // 速度
     radius: f64,            // 半径
     color: Color,           // 表示色
+}
+
+// 恒星の運動には影響を与えない、観測地点となる軽い惑星。
+struct Planet {
+    position: Vector3<f64>,
+    velocity: Vector3<f64>,
+}
+
+struct PlanetFactory;
+
+impl PlanetFactory {
+    /// 各プリセットの重心付近を通過する、共通の観測惑星を生成する。
+    fn create(stars: &[Star]) -> Planet {
+        let total_mass: f64 = stars.iter().map(|star| star.mass).sum();
+        let center = stars
+            .iter()
+            .map(|star| star.position * star.mass)
+            .sum::<Vector3<f64>>()
+            / total_mass;
+        let center_velocity = stars
+            .iter()
+            .map(|star| star.velocity * star.mass)
+            .sum::<Vector3<f64>>()
+            / total_mass;
+
+        Planet {
+            position: center + Vector3::new(0.0, -220.0, 0.0),
+            velocity: center_velocity + Vector3::new(55.0, 0.0, 0.0),
+        }
+    }
 }
 
 // 実験しやすいよう、3つの星の質量・位置・速度をひとまとめにした初期値セット。
@@ -274,12 +305,108 @@ fn calculate_gravity_norm(star1: &Star, star2: &Star) -> f64 {
     G * star1.mass * star2.mass / distance_squared
 }
 
+// 惑星は恒星を動かさない「質量0の試験粒子」として、3恒星からの加速度だけを受ける。
+fn update_planet(planet: &mut Planet, stars: &[Star], dt: f64) {
+    let mut acceleration = Vector3::zeros();
+    for star in stars {
+        let offset = star.position - planet.position;
+        // 極端な接近時にも数値が発散しないよう、星の半径程度の軟化を入れる。
+        let softened_distance_squared = offset.norm_squared() + star.radius.powi(2);
+        acceleration += offset * G * star.mass / softened_distance_squared.powf(1.5);
+    }
+    planet.velocity += acceleration * dt;
+    planet.position += planet.velocity * dt;
+}
+
 fn draw_stars(stars: &[Star]) {
     for star in stars {
         draw_circle(
             star.position.x as f32,
             star.position.y as f32,
             star.radius as f32,
+            star.color,
+        );
+    }
+}
+
+fn draw_planet(planet: &Planet) {
+    let x = planet.position.x as f32;
+    let y = planet.position.y as f32;
+    draw_circle(x, y, 7.0, BLUE);
+    draw_circle_lines(x, y, 11.0, 2.0, WHITE);
+    draw_text("Planet", x + 14.0, y - 8.0, 16.0, WHITE);
+}
+
+// 惑星から見た各恒星の方向を、全天図の円周上の座標へ変換する。
+fn sky_positions(planet: &Planet, stars: &[Star], center: Vec2, radius: f32) -> [Vec2; 3] {
+    std::array::from_fn(|index| {
+        let direction = stars[index].position - planet.position;
+        let direction_2d = vec2(direction.x as f32, direction.y as f32).normalize_or_zero();
+        center + direction_2d * radius
+    })
+}
+
+fn draw_planet_sky(
+    planet: &Planet,
+    stars: &[Star],
+    history: &VecDeque<[Vec2; 3]>,
+    center: Vec2,
+    radius: f32,
+) {
+    // 右側を惑星の空として塗り直し、俯瞰図と明確に分ける。
+    draw_rectangle(
+        800.0,
+        0.0,
+        400.0,
+        700.0,
+        Color::new(0.015, 0.025, 0.08, 1.0),
+    );
+    draw_line(800.0, 0.0, 800.0, 700.0, 2.0, DARKGRAY);
+    draw_text("Sky from the planet", 830.0, 42.0, 28.0, WHITE);
+    draw_text("N", center.x - 6.0, center.y - radius - 15.0, 18.0, GRAY);
+    draw_text("E", center.x + radius + 8.0, center.y + 5.0, 18.0, GRAY);
+    draw_text("S", center.x - 6.0, center.y + radius + 25.0, 18.0, GRAY);
+    draw_text("W", center.x - radius - 25.0, center.y + 5.0, 18.0, GRAY);
+    draw_circle_lines(center.x, center.y, radius, 2.0, GRAY);
+    draw_circle(center.x, center.y, 6.0, BLUE);
+
+    // 過去の見かけ方向を薄い線で残し、惑星の空での移動を読めるようにする。
+    for star_index in 0..3 {
+        let mut samples = history.iter();
+        let Some(mut previous) = samples.next() else {
+            continue;
+        };
+        for (age, current) in samples.enumerate() {
+            let alpha = 0.08 + 0.35 * age as f32 / history.len().max(1) as f32;
+            let color = Color::new(
+                stars[star_index].color.r,
+                stars[star_index].color.g,
+                stars[star_index].color.b,
+                alpha,
+            );
+            draw_line(
+                previous[star_index].x,
+                previous[star_index].y,
+                current[star_index].x,
+                current[star_index].y,
+                2.0,
+                color,
+            );
+            previous = current;
+        }
+    }
+
+    let positions = sky_positions(planet, stars, center, radius);
+    for (index, (star, position)) in stars.iter().zip(positions).enumerate() {
+        let distance = (star.position - planet.position).norm() as f32;
+        // 近い恒星ほど大きく見せる。実半径ではなく視認性を優先した表現。
+        let apparent_radius = (1800.0 / distance.max(1.0)).clamp(6.0, 28.0);
+        draw_circle(position.x, position.y, apparent_radius, star.color);
+        draw_text(
+            &format!("Star {}  d={:.0}", index + 1, distance),
+            830.0,
+            560.0 + index as f32 * 28.0,
+            20.0,
             star.color,
         );
     }
@@ -313,10 +440,22 @@ fn draw_lagrange_points(points: &[LagrangePoint], primary: &Star, secondary: &St
     }
 }
 
-#[macroquad::main("ThreeBodyViewer")]
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "ThreeBodyViewer".to_owned(),
+        window_width: 1200,
+        window_height: 700,
+        ..Default::default()
+    }
+}
+
+#[macroquad::main(window_conf)]
 async fn main() {
     let mut preset_index = 0;
     let mut preset = SimulationPresetFactory::create(preset_index);
+    let mut planet = PlanetFactory::create(&preset.stars);
+    let mut sky_history: VecDeque<[Vec2; 3]> = VecDeque::new();
+    let mut history_timer = 0.0;
 
     loop {
         // 数字キー1〜9と0（10番）で、その場で別の初期値へリセットできる。
@@ -336,6 +475,9 @@ async fn main() {
             if is_key_pressed(*key) {
                 preset_index = index;
                 preset = SimulationPresetFactory::create(preset_index);
+                planet = PlanetFactory::create(&preset.stars);
+                sky_history.clear();
+                history_timer = 0.0;
             }
         }
 
@@ -368,14 +510,33 @@ async fn main() {
                     star.velocity += acceleration * sub_dt;
                     star.position += star.velocity * sub_dt;
                 }
+                update_planet(&mut planet, &preset.stars, sub_dt);
             }
 
             // 描画
             draw_stars(&preset.stars);
+            draw_planet(&planet);
             // 先頭2つの星を主星として、現在位置からL1〜L5を表示する。
             let lagrange_points = LagrangePointFactory::create(&preset.stars[0], &preset.stars[1]);
             draw_lagrange_points(&lagrange_points, &preset.stars[0], &preset.stars[1]);
         }
+
+        let sky_center = vec2(1000.0, 310.0);
+        let sky_radius = 145.0;
+        history_timer += dt;
+        if history_timer >= 0.08 {
+            sky_history.push_back(sky_positions(
+                &planet,
+                &preset.stars,
+                sky_center,
+                sky_radius,
+            ));
+            if sky_history.len() > 120 {
+                sky_history.pop_front();
+            }
+            history_timer = 0.0;
+        }
+        draw_planet_sky(&planet, &preset.stars, &sky_history, sky_center, sky_radius);
 
         draw_text(&format!("FPS: {}", get_fps()), 10.0, 30.0, 24.0, DARKGRAY);
         draw_text(
