@@ -1,0 +1,396 @@
+use macroquad::prelude::*;
+use nalgebra::Vector3;
+
+const G: f64 = 6.67430e-11; // 万有引力定数
+const STEP_PER_FRAME: i32 = 100; // 1フレームあたりのシミュレーションステップ数
+const STAR_MASS: f64 = 1.0e16;
+const ORBIT_RADIUS: f64 = 150.0;
+
+// 恒星
+struct Star {
+    mass: f64,              // 質量
+    position: Vector3<f64>, // 位置
+    velocity: Vector3<f64>, // 速度
+    radius: f64,            // 半径
+    color: Color,           // 表示色
+}
+
+// 実験しやすいよう、3つの星の質量・位置・速度をひとまとめにした初期値セット。
+struct SimulationPreset {
+    name: &'static str,
+    stars: Vec<Star>,
+}
+
+struct SimulationPresetFactory;
+
+impl SimulationPresetFactory {
+    const COUNT: usize = 10;
+
+    /// 0〜9の番号から、異なる動きをする3天体の初期値を生成する。
+    /// 範囲外の番号は0番（正三角形軌道）として扱う。
+    fn create(index: usize) -> SimulationPreset {
+        let center = Vector3::new(400.0, 300.0, 0.0);
+        let star = |mass, x, y, vx, vy, color| Star {
+            mass,
+            position: center + Vector3::new(x, y, 0.0),
+            velocity: Vector3::new(vx, vy, 0.0),
+            radius: 16.0,
+            color,
+        };
+
+        match index {
+            // 3つの等質量星が正三角形を保ちながら回転する初期値。
+            0 => {
+                let speed = (G * STAR_MASS / (3.0_f64.sqrt() * ORBIT_RADIUS)).sqrt();
+                SimulationPreset {
+                    name: "Triangle orbit",
+                    stars: vec![
+                        star(STAR_MASS, ORBIT_RADIUS, 0.0, 0.0, speed, YELLOW),
+                        star(
+                            STAR_MASS,
+                            -ORBIT_RADIUS / 2.0,
+                            ORBIT_RADIUS * 3.0_f64.sqrt() / 2.0,
+                            -speed * 3.0_f64.sqrt() / 2.0,
+                            -speed / 2.0,
+                            SKYBLUE,
+                        ),
+                        star(
+                            STAR_MASS,
+                            -ORBIT_RADIUS / 2.0,
+                            -ORBIT_RADIUS * 3.0_f64.sqrt() / 2.0,
+                            speed * 3.0_f64.sqrt() / 2.0,
+                            -speed / 2.0,
+                            PINK,
+                        ),
+                    ],
+                }
+            }
+            // 有名な三体問題の周期解。3つの星が同じ8の字軌道を追いかける。
+            1 => {
+                let position_scale = 120.0;
+                let velocity_scale = (G * STAR_MASS / position_scale).sqrt();
+                SimulationPreset {
+                    name: "Figure eight",
+                    stars: vec![
+                        star(
+                            STAR_MASS,
+                            0.97000436 * position_scale,
+                            -0.24308753 * position_scale,
+                            0.466203685 * velocity_scale,
+                            0.43236573 * velocity_scale,
+                            YELLOW,
+                        ),
+                        star(
+                            STAR_MASS,
+                            -0.97000436 * position_scale,
+                            0.24308753 * position_scale,
+                            0.466203685 * velocity_scale,
+                            0.43236573 * velocity_scale,
+                            SKYBLUE,
+                        ),
+                        star(
+                            STAR_MASS,
+                            0.0,
+                            0.0,
+                            -0.93240737 * velocity_scale,
+                            -0.86473146 * velocity_scale,
+                            PINK,
+                        ),
+                    ],
+                }
+            }
+            // 速度0で一直線に並べ、重力だけで互いに落下させる単純な例。
+            2 => SimulationPreset {
+                name: "Collinear fall",
+                stars: vec![
+                    star(STAR_MASS, -160.0, 0.0, 0.0, 0.0, YELLOW),
+                    star(STAR_MASS, 0.0, 0.0, 0.0, 0.0, SKYBLUE),
+                    star(STAR_MASS, 160.0, 0.0, 0.0, 0.0, PINK),
+                ],
+            },
+            // 2つの重い星の近くを、軽い3つ目の星が横切る初期値。
+            3 => SimulationPreset {
+                name: "Binary and visitor",
+                stars: vec![
+                    star(1.5e16, -90.0, 0.0, 0.0, -45.0, YELLOW),
+                    star(1.5e16, 90.0, 0.0, 0.0, 45.0, SKYBLUE),
+                    star(2.0e15, -260.0, -130.0, 105.0, 45.0, PINK),
+                ],
+            },
+            // 質量も速度も揃えず、予測しにくい動きを観察するための例。
+            4 => SimulationPreset {
+                name: "Asymmetric dance",
+                stars: vec![
+                    star(1.8e16, -130.0, -70.0, 25.0, -30.0, YELLOW),
+                    star(8.0e15, 120.0, -40.0, 20.0, 65.0, SKYBLUE),
+                    star(1.2e16, 10.0, 150.0, -55.0, -20.0, PINK),
+                ],
+            },
+            // 6〜10番は、軽い第3天体を各ラグランジュ点へ配置する観察用セット。
+            5 => Self::create_lagrange_probe(0, "Probe at L1"),
+            6 => Self::create_lagrange_probe(1, "Probe at L2"),
+            7 => Self::create_lagrange_probe(2, "Probe at L3"),
+            8 => Self::create_lagrange_probe(3, "Probe at L4"),
+            9 => Self::create_lagrange_probe(4, "Probe at L5"),
+            _ => Self::create(0),
+        }
+    }
+
+    /// 質量の違う2つの主星を円運動させ、指定したラグランジュ点へ
+    /// 重力への影響がほぼない軽い観測星を置く。
+    fn create_lagrange_probe(point_index: usize, name: &'static str) -> SimulationPreset {
+        let center = Vector3::new(400.0, 300.0, 0.0);
+        let primary_mass = 2.0e16;
+        let secondary_mass = 1.0e16;
+        let distance: f64 = 220.0;
+        let total_mass = primary_mass + secondary_mass;
+        let angular_speed = (G * total_mass / distance.powi(3)).sqrt();
+
+        // 重心が画面中央に来るよう、質量比に応じて主星を左右へ配置する。
+        let primary_position =
+            center + Vector3::new(-distance * secondary_mass / total_mass, 0.0, 0.0);
+        let secondary_position =
+            center + Vector3::new(distance * primary_mass / total_mass, 0.0, 0.0);
+        let circular_velocity = |position: Vector3<f64>| {
+            let offset = position - center;
+            Vector3::new(-angular_speed * offset.y, angular_speed * offset.x, 0.0)
+        };
+
+        let primary = Star {
+            mass: primary_mass,
+            position: primary_position,
+            velocity: circular_velocity(primary_position),
+            radius: 18.0,
+            color: YELLOW,
+        };
+        let secondary = Star {
+            mass: secondary_mass,
+            position: secondary_position,
+            velocity: circular_velocity(secondary_position),
+            radius: 14.0,
+            color: SKYBLUE,
+        };
+
+        let probe_position =
+            LagrangePointFactory::create(&primary, &secondary)[point_index].position;
+        let probe = Star {
+            // 円制限三体問題へ近づけるため、観測星の質量は主星より十分小さくする。
+            mass: 1.0e8,
+            position: probe_position,
+            velocity: circular_velocity(probe_position),
+            radius: 8.0,
+            color: PINK,
+        };
+
+        SimulationPreset {
+            name,
+            stars: vec![primary, secondary, probe],
+        }
+    }
+}
+
+// ラグランジュ点は「天体」ではなく、2つの主星と一緒に回る座標系で
+// 重力と遠心力が釣り合う場所。通常は L1〜L5 の5点が存在する。
+struct LagrangePoint {
+    name: &'static str,
+    position: Vector3<f64>,
+}
+
+struct LagrangePointFactory;
+
+impl LagrangePointFactory {
+    /// 2つの主星から5つのラグランジュ点を生成する。
+    ///
+    /// 円制限三体問題（主星同士は円運動し、置く物体の質量は無視できる）を
+    /// 仮定している。L1〜L3は数値計算、L4・L5は正三角形から求める。
+    fn create(primary: &Star, secondary: &Star) -> [LagrangePoint; 5] {
+        let relative = secondary.position - primary.position;
+        let distance = relative.norm();
+        assert!(distance > f64::EPSILON, "主星同士の位置が重なっています");
+        assert!(
+            primary.mass > 0.0 && secondary.mass > 0.0,
+            "主星の質量は正の値にしてください"
+        );
+
+        let x_axis = relative / distance;
+        // 現在はXY平面上の運動を扱うため、x軸を90度回した方向をy軸にする。
+        let y_axis = Vector3::new(-x_axis.y, x_axis.x, 0.0);
+        let total_mass = primary.mass + secondary.mass;
+        let mu = secondary.mass / total_mass;
+        let center =
+            (primary.position * primary.mass + secondary.position * secondary.mass) / total_mass;
+
+        // 重心を原点、主星間距離を1とした回転座標系でL1〜L3を解く。
+        let l1_x = Self::solve_collinear(mu, -mu, 1.0 - mu);
+        let l2_x = Self::solve_collinear(mu, 1.0 - mu, 2.0);
+        let l3_x = Self::solve_collinear(mu, -2.0, -mu);
+
+        let point = |name, x: f64, y: f64| LagrangePoint {
+            name,
+            position: center + (x_axis * x + y_axis * y) * distance,
+        };
+
+        [
+            point("L1", l1_x, 0.0),
+            point("L2", l2_x, 0.0),
+            point("L3", l3_x, 0.0),
+            point("L4", 0.5 - mu, 3.0_f64.sqrt() / 2.0),
+            point("L5", 0.5 - mu, -3.0_f64.sqrt() / 2.0),
+        ]
+    }
+
+    // x方向の有効力が0になる場所を二分法で探す。
+    fn solve_collinear(mu: f64, left: f64, right: f64) -> f64 {
+        // 主星そのもの（区間端）では式が発散するため、わずかに内側から探す。
+        let epsilon = 1.0e-9;
+        let mut low = left + epsilon;
+        let mut high = right - epsilon;
+
+        for _ in 0..100 {
+            let middle = (low + high) / 2.0;
+            if Self::effective_force(mu, low).signum() == Self::effective_force(mu, middle).signum()
+            {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+
+        (low + high) / 2.0
+    }
+
+    // 正規化した回転座標系における、x方向の重力と遠心力の合計。
+    fn effective_force(mu: f64, x: f64) -> f64 {
+        let primary_offset = x + mu;
+        let secondary_offset = x - (1.0 - mu);
+        x - (1.0 - mu) * primary_offset / primary_offset.abs().powi(3)
+            - mu * secondary_offset / secondary_offset.abs().powi(3)
+    }
+}
+
+// 2つの恒星間に働く万有引力の大きさを計算する
+fn calculate_gravity_norm(star1: &Star, star2: &Star) -> f64 {
+    let distance_squared = (star2.position - star1.position).norm_squared();
+    G * star1.mass * star2.mass / distance_squared
+}
+
+fn draw_stars(stars: &[Star]) {
+    for star in stars {
+        draw_circle(
+            star.position.x as f32,
+            star.position.y as f32,
+            star.radius as f32,
+            star.color,
+        );
+    }
+}
+
+fn draw_lagrange_points(points: &[LagrangePoint], primary: &Star, secondary: &Star) {
+    let guide_color = Color::new(0.2, 0.8, 0.3, 0.25);
+    let draw_guide = |from: Vector3<f64>, to: Vector3<f64>| {
+        draw_line(
+            from.x as f32,
+            from.y as f32,
+            to.x as f32,
+            to.y as f32,
+            1.0,
+            guide_color,
+        );
+    };
+
+    // 主星間の軸と、L4・L5が作る正三角形を薄い補助線で示す。
+    draw_guide(primary.position, secondary.position);
+    for point in &points[3..=4] {
+        draw_guide(primary.position, point.position);
+        draw_guide(secondary.position, point.position);
+    }
+
+    for point in points {
+        let x = point.position.x as f32;
+        let y = point.position.y as f32;
+        draw_circle_lines(x, y, 7.0, 2.0, GREEN);
+        draw_text(point.name, x + 10.0, y - 8.0, 18.0, GREEN);
+    }
+}
+
+#[macroquad::main("ThreeBodyViewer")]
+async fn main() {
+    let mut preset_index = 0;
+    let mut preset = SimulationPresetFactory::create(preset_index);
+
+    loop {
+        // 数字キー1〜9と0（10番）で、その場で別の初期値へリセットできる。
+        let preset_keys = [
+            KeyCode::Key1,
+            KeyCode::Key2,
+            KeyCode::Key3,
+            KeyCode::Key4,
+            KeyCode::Key5,
+            KeyCode::Key6,
+            KeyCode::Key7,
+            KeyCode::Key8,
+            KeyCode::Key9,
+            KeyCode::Key0,
+        ];
+        for (index, key) in preset_keys.iter().enumerate() {
+            if is_key_pressed(*key) {
+                preset_index = index;
+                preset = SimulationPresetFactory::create(preset_index);
+            }
+        }
+
+        let dt = get_frame_time();
+        let sub_dt = dt as f64 / STEP_PER_FRAME as f64;
+
+        clear_background(BLACK);
+
+        {
+            // シミュレート
+            for _ in 0..STEP_PER_FRAME {
+                let mut forces = vec![Vector3::new(0.0, 0.0, 0.0); preset.stars.len()];
+
+                // 万有引力の計算
+                for i in 0..preset.stars.len() {
+                    for j in 0..preset.stars.len() {
+                        if i != j {
+                            let gravity_norm =
+                                calculate_gravity_norm(&preset.stars[i], &preset.stars[j]);
+                            let direction =
+                                (preset.stars[j].position - preset.stars[i].position).normalize();
+                            forces[i] += direction * gravity_norm;
+                        }
+                    }
+                }
+
+                // 速度と位置の更新
+                for (star, force) in preset.stars.iter_mut().zip(forces) {
+                    let acceleration = force / star.mass;
+                    star.velocity += acceleration * sub_dt;
+                    star.position += star.velocity * sub_dt;
+                }
+            }
+
+            // 描画
+            draw_stars(&preset.stars);
+            // 先頭2つの星を主星として、現在位置からL1〜L5を表示する。
+            let lagrange_points = LagrangePointFactory::create(&preset.stars[0], &preset.stars[1]);
+            draw_lagrange_points(&lagrange_points, &preset.stars[0], &preset.stars[1]);
+        }
+
+        draw_text(&format!("FPS: {}", get_fps()), 10.0, 30.0, 24.0, DARKGRAY);
+        draw_text(
+            &format!(
+                "Preset {}/{}: {}  [keys 1-9, 0]",
+                preset_index + 1,
+                SimulationPresetFactory::COUNT,
+                preset.name
+            ),
+            10.0,
+            55.0,
+            22.0,
+            LIGHTGRAY,
+        );
+
+        next_frame().await
+    }
+}
