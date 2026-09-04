@@ -354,6 +354,77 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
     )
 }
 
+// 小説をモチーフにした視覚演出であり、実際の恒星大気の物理モデルではない。
+// 半径の30倍より遠方では飛星、12倍以内では気体層を持つ太陽として見せる。
+// smoothstepで透明度を連続的につなぎ、境界での点滅を防ぐ。
+fn gas_visibility(distance: f64, radius: f64) -> f32 {
+    let t = ((30.0 - distance / radius.max(1.0)) / 18.0).clamp(0.0, 1.0) as f32;
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn draw_stellar_appearance(x: f32, y: f32, radius: f32, gas: f32, color: Color, time: f64) {
+    // 接近すると大きく見える熱い気体の球殻と、淡い外縁の光芒。
+    let shell = radius * 2.6;
+    for layer in (1..=8).rev() {
+        draw_circle(
+            x,
+            y,
+            shell * (1.0 + layer as f32 * 0.10),
+            Color::new(color.r, color.g, color.b, gas * 0.018),
+        );
+    }
+    draw_circle(
+        x,
+        y,
+        shell,
+        Color::new(color.r, color.g, color.b, gas * 0.48),
+    );
+    for layer in (1..=8).rev() {
+        let fraction = layer as f32 / 8.0;
+        draw_circle(
+            x,
+            y,
+            shell * fraction,
+            Color::new(
+                1.0,
+                0.78 + 0.18 * (1.0 - fraction),
+                0.48 + 0.36 * (1.0 - fraction),
+                gas * 0.18,
+            ),
+        );
+    }
+    draw_circle(x, y, radius, Color::new(1.0, 0.96, 0.84, gas));
+
+    // 遠方では球面を描かず、小さな点光源と細い光条で「飛星」を表現する。
+    // 光条は気体層ではなく見え方の演出。位置の運動は元の軌道計算を使う。
+    let point = 1.0 - gas;
+    let shimmer = 1.0 + 0.12 * (time as f32 * 5.0 + color.g * 7.0).sin();
+    let length = 7.0 * shimmer;
+    draw_circle(
+        x,
+        y,
+        5.0,
+        Color::new(color.r, color.g, color.b, point * 0.12),
+    );
+    draw_line(
+        x - length,
+        y,
+        x + length,
+        y,
+        1.0,
+        Color::new(color.r, color.g, color.b, point * 0.8),
+    );
+    draw_line(
+        x,
+        y - length,
+        x,
+        y + length,
+        1.0,
+        Color::new(color.r, color.g, color.b, point * 0.8),
+    );
+    draw_circle(x, y, 1.8 * shimmer, Color::new(1.0, 0.98, 0.9, point));
+}
+
 // 地上から周囲360度を見渡したパノラマ。地平線より下の恒星は地面で隠す。
 // 軌道計算は2次元だが、観測地点の緯度と自転から空の高度を求める。
 fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
@@ -393,21 +464,13 @@ fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
         let radius = ((star.radius / distance).atan() as f32 * (horizon - 100.0)
             / std::f32::consts::FRAC_PI_2)
             .clamp(2.0, 120.0);
-        if y - radius > horizon {
+        let gas = gas_visibility(distance, star.radius);
+        if y - (radius * 2.6 * 1.8).max(8.0) > horizon {
             continue;
         }
         // パノラマの左右の継ぎ目でも太陽が途切れないよう複製する。
         for wrap in [-w, 0.0, w] {
-            for layer in (1..=6).rev() {
-                draw_circle(
-                    x + wrap,
-                    y,
-                    radius * (1.0 + layer as f32 * 0.24),
-                    Color::new(star.color.r, star.color.g, star.color.b, 0.025),
-                );
-            }
-            draw_circle(x + wrap, y, radius, star.color);
-            draw_circle(x + wrap, y, radius * 0.72, Color::new(1.0, 0.96, 0.84, 0.9));
+            draw_stellar_appearance(x + wrap, y, radius, gas, star.color, time);
         }
     }
     // 地面を最後に描くことで、日没中の太陽も地平線で正しく隠れる。
@@ -640,6 +703,15 @@ fn draw_observer_overview(planet: &Planet, stars: &[Star], time: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gas_layer_fades_in_continuously_on_approach() {
+        assert_eq!(gas_visibility(600.0, 16.0), 0.0);
+        assert_eq!(gas_visibility(192.0, 16.0), 1.0);
+        assert!((gas_visibility(336.0, 16.0) - 0.5).abs() < 1.0e-6);
+        assert!(gas_visibility(300.0, 16.0) > gas_visibility(400.0, 16.0));
+        assert!((gas_visibility(479.99, 16.0) - gas_visibility(480.01, 16.0)).abs() < 1.0e-5);
+    }
 
     #[test]
     fn ground_projection_distinguishes_zenith_and_below_horizon() {
