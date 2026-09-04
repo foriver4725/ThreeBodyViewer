@@ -355,10 +355,10 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
 }
 
 // 小説をモチーフにした視覚演出であり、実際の恒星大気の物理モデルではない。
-// 半径の30倍を境に、飛星から球へ瞬時に切り替える。
+// 半径の25倍を境に、飛星から球へ瞬時に切り替える。
 // 境界の前後で混ぜないことが、この演出の要点。
 fn gas_visibility(distance: f64, radius: f64) -> f32 {
-    if distance <= radius.max(1.0) * 30.0 {
+    if distance <= radius.max(1.0) * 25.0 {
         1.0
     } else {
         0.0
@@ -430,7 +430,12 @@ fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
         .collect();
     let daylight = coordinates
         .iter()
-        .map(|(_, altitude)| (altitude.sin() * 3.0 + 0.15).clamp(0.0, 1.0))
+        .zip(stars)
+        .map(|((_, altitude), star)| {
+            // 飛星の点光源は視認用の目印だけ。空と地面を照らさない。
+            let visible = gas_visibility((star.position - planet.position).norm(), star.radius);
+            (altitude.sin() * 3.0 + 0.15).clamp(0.0, 1.0) * visible as f64
+        })
         .fold(0.0_f64, f64::max) as f32;
     // 高度に応じた空のグラデーションと、地平線付近の霞。
     for row in 0..100 {
@@ -504,6 +509,10 @@ fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
 // 明るさは質量に比例すると仮定する（実際の恒星の質量光度関係ではない）。
 // 表面以下の距離は半径で制限し、接近時の発散を防ぐ。
 fn relative_heat(star: &Star, planet: &Planet) -> f64 {
+    // 飛星の間は光・熱を届けないという演出上のルール。重力は従来通り作用する。
+    if gas_visibility((star.position - planet.position).norm(), star.radius) == 0.0 {
+        return 0.0;
+    }
     let distance = (star.position - planet.position)
         .norm()
         .max(star.radius)
@@ -698,9 +707,9 @@ mod tests {
 
     #[test]
     fn gas_layer_switches_abruptly_at_boundary() {
-        assert_eq!(gas_visibility(480.01, 16.0), 0.0);
-        assert_eq!(gas_visibility(480.0, 16.0), 1.0);
-        assert_eq!(gas_visibility(479.99, 16.0), 1.0);
+        assert_eq!(gas_visibility(400.01, 16.0), 0.0);
+        assert_eq!(gas_visibility(400.0, 16.0), 1.0);
+        assert_eq!(gas_visibility(399.99, 16.0), 1.0);
     }
 
     #[test]
@@ -732,6 +741,8 @@ mod tests {
         assert!((near - 1.0).abs() < 1.0e-10);
         planet.position.x = 400.0;
         assert!((relative_heat(star, &planet) - near / 4.0).abs() < 1.0e-10);
+        planet.position.x = 400.01;
+        assert_eq!(relative_heat(star, &planet), 0.0);
         planet.position = Vector3::zeros();
         assert!(relative_heat(star, &planet).is_finite());
     }
