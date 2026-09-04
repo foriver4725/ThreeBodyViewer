@@ -445,6 +445,90 @@ fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
     }
 }
 
+// 基準質量の恒星から距離200で受ける光・熱を1とする、演出用の相対熱量。
+// 明るさは質量に比例すると仮定する（実際の恒星の質量光度関係ではない）。
+// 表面以下の距離は半径で制限し、接近時の発散を防ぐ。
+fn relative_heat(star: &Star, planet: &Planet) -> f64 {
+    let distance = (star.position - planet.position)
+        .norm()
+        .max(star.radius)
+        .max(1.0);
+    (star.mass / STAR_MASS) * (200.0 / distance).powi(2)
+}
+
+fn draw_heat_panel(planet: &Planet, stars: &[Star], time: f64) {
+    let phase = -std::f64::consts::FRAC_PI_2 + time * std::f64::consts::TAU / 60.0;
+    let incoming: Vec<f64> = stars
+        .iter()
+        .map(|star| relative_heat(star, planet))
+        .collect();
+    // 地上の水平面が受ける直射成分。地平線以下は0、天頂では最大。
+    // 大気・反射・蓄熱・食は含めないので、地表温度そのものではない。
+    let surface: Vec<f64> = stars
+        .iter()
+        .zip(&incoming)
+        .map(|(star, heat)| {
+            let (_, altitude) = horizontal_coordinates(star.position - planet.position, phase);
+            heat * altitude.sin().max(0.0)
+        })
+        .collect();
+    let total: f64 = incoming.iter().sum();
+    let ground: f64 = surface.iter().sum();
+    draw_rectangle(
+        12.0,
+        565.0,
+        776.0,
+        128.0,
+        Color::new(0.015, 0.02, 0.025, 0.92),
+    );
+    draw_text(
+        &format!(
+            "RELATIVE HEAT   Space: {:.2}x   Ground: {:.2}x",
+            total, ground
+        ),
+        25.0,
+        589.0,
+        22.0,
+        WHITE,
+    );
+    for (index, star) in stars.iter().enumerate() {
+        let y = 607.0 + index as f32 * 21.0;
+        draw_text(
+            &format!("Star {}", index + 1),
+            25.0,
+            y + 11.0,
+            18.0,
+            star.color,
+        );
+        draw_rectangle(102.0, y, 230.0, 10.0, Color::new(0.16, 0.17, 0.19, 1.0));
+        // ゲージの最大は5倍。範囲外でも右側の数値は丸めずに表示する。
+        draw_rectangle(
+            102.0,
+            y,
+            230.0 * (surface[index] / 5.0).clamp(0.0, 1.0) as f32,
+            10.0,
+            star.color,
+        );
+        draw_text(
+            &format!(
+                "Ground {:.2}x / Space {:.2}x",
+                surface[index], incoming[index]
+            ),
+            350.0,
+            y + 11.0,
+            18.0,
+            star.color,
+        );
+    }
+    draw_text(
+        "1x = reference star at distance 200 | bars: 0-5x | not temperature",
+        25.0,
+        683.0,
+        16.0,
+        GRAY,
+    );
+}
+
 fn draw_lagrange_points(points: &[LagrangePoint], primary: &Star, secondary: &Star) {
     let guide_color = Color::new(0.2, 0.8, 0.3, 0.25);
     let draw_guide = |from: Vector3<f64>, to: Vector3<f64>| {
@@ -567,6 +651,23 @@ mod tests {
     }
 
     #[test]
+    fn heat_follows_inverse_square_distance() {
+        let mut preset = SimulationPresetFactory::create(0);
+        let star = &mut preset.stars[0];
+        star.position = Vector3::zeros();
+        let mut planet = Planet {
+            position: Vector3::new(200.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+        };
+        let near = relative_heat(star, &planet);
+        assert!((near - 1.0).abs() < 1.0e-10);
+        planet.position.x = 400.0;
+        assert!((relative_heat(star, &planet) - near / 4.0).abs() < 1.0e-10);
+        planet.position = Vector3::zeros();
+        assert!(relative_heat(star, &planet).is_finite());
+    }
+
+    #[test]
     fn rotation_changes_sun_altitude() {
         let direction = Vector3::new(1.0, 0.0, 0.0);
         assert!(horizontal_coordinates(direction, 0.0).1 > 0.0);
@@ -577,8 +678,8 @@ mod tests {
 fn window_conf() -> Conf {
     Conf {
         window_title: "ThreeBodyViewer".to_owned(),
-        window_width: 1200,
-        window_height: 700,
+        window_width: 1600,
+        window_height: 900,
         ..Default::default()
     }
 }
@@ -675,6 +776,7 @@ async fn main() {
         set_camera(&panel_camera(ground_target.clone()));
         clear_background(BLACK);
         draw_ground_sky(&planet, &preset.stars, simulation_time);
+        draw_heat_panel(&planet, &preset.stars, simulation_time);
         draw_text("GROUND / 360-degree panorama", 20.0, 35.0, 24.0, WHITE);
         set_default_camera();
         let split = screen_width() * 0.45;
