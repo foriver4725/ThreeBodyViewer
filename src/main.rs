@@ -355,10 +355,10 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
 }
 
 // 小説をモチーフにした視覚演出であり、実際の恒星大気の物理モデルではない。
-// 半径の21倍を境に、飛星から気体層を持つ球へ瞬時に切り替える。
+// 半径の30倍を境に、飛星から球へ瞬時に切り替える。
 // 境界の前後で混ぜないことが、この演出の要点。
 fn gas_visibility(distance: f64, radius: f64) -> f32 {
-    if distance <= radius.max(1.0) * 21.0 {
+    if distance <= radius.max(1.0) * 30.0 {
         1.0
     } else {
         0.0
@@ -371,37 +371,17 @@ fn flying_star_radius(panel_scale: f32) -> f32 {
 }
 
 fn draw_stellar_appearance(x: f32, y: f32, radius: f32, gas: f32, color: Color, time: f64) {
-    // 接近すると大きく見える熱い気体の球殻と、淡い外縁の光芒。
-    let shell = radius * 2.6;
-    for layer in (1..=8).rev() {
+    // 球の見た目は元の円盤と淡い光芒。追加の気体層は描かない。
+    for layer in (1..=6).rev() {
         draw_circle(
             x,
             y,
-            shell * (1.0 + layer as f32 * 0.10),
-            Color::new(color.r, color.g, color.b, gas * 0.018),
+            radius * (1.0 + layer as f32 * 0.24),
+            Color::new(color.r, color.g, color.b, gas * 0.025),
         );
     }
-    draw_circle(
-        x,
-        y,
-        shell,
-        Color::new(color.r, color.g, color.b, gas * 0.48),
-    );
-    for layer in (1..=8).rev() {
-        let fraction = layer as f32 / 8.0;
-        draw_circle(
-            x,
-            y,
-            shell * fraction,
-            Color::new(
-                1.0,
-                0.78 + 0.18 * (1.0 - fraction),
-                0.48 + 0.36 * (1.0 - fraction),
-                gas * 0.18,
-            ),
-        );
-    }
-    draw_circle(x, y, radius, Color::new(1.0, 0.96, 0.84, gas));
+    draw_circle(x, y, radius, Color::new(color.r, color.g, color.b, gas));
+    draw_circle(x, y, radius * 0.72, Color::new(1.0, 0.96, 0.84, gas * 0.9));
 
     // 遠方では球面を描かず、小さな点光源と細い光条で「飛星」を表現する。
     // 光条は気体層ではなく見え方の演出。位置の運動は元の軌道計算を使う。
@@ -718,9 +698,9 @@ mod tests {
 
     #[test]
     fn gas_layer_switches_abruptly_at_boundary() {
-        assert_eq!(gas_visibility(336.01, 16.0), 0.0);
-        assert_eq!(gas_visibility(336.0, 16.0), 1.0);
-        assert_eq!(gas_visibility(335.99, 16.0), 1.0);
+        assert_eq!(gas_visibility(480.01, 16.0), 0.0);
+        assert_eq!(gas_visibility(480.0, 16.0), 1.0);
+        assert_eq!(gas_visibility(479.99, 16.0), 1.0);
     }
 
     #[test]
