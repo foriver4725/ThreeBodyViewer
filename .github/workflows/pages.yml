@@ -25,6 +25,8 @@ jobs:
         run: cargo test --locked
       - name: Web版をビルド
         run: bash scripts/build-web.sh
+      - name: Web起動コードを検証
+        run: node scripts/test-web.cjs
       - name: 配布ファイルをアップロード
         uses: actions/upload-pages-artifact@v4
         with:

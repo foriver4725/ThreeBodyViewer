@@ -15,6 +15,8 @@
   <div id="status" role="status">三体シミュレーションを読み込み中…</div>
   <script src="mq_js_bundle.js"></script>
   <script>
+    // ランタイムのグローバル変数と衝突しないようローカルスコープに閉じ込める。
+    (() => {
     const canvas = document.getElementById('glcanvas');
     const status = document.getElementById('status');
     window.addEventListener('error', () => { status.textContent = '起動に失敗しました。再読み込みをお試しください。'; });
@@ -31,6 +33,7 @@
     } else {
       status.textContent = '描画ランタイムが見つかりません。Web版を再ビルドしてください。';
     }
+    })();
   </script>
 </body>
 </html>
