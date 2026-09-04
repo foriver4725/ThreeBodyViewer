@@ -357,8 +357,8 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
 // 地上から周囲360度を見渡したパノラマ。地平線より下の恒星は地面で隠す。
 // 軌道計算は2次元だが、観測地点の緯度と自転から空の高度を求める。
 fn draw_ground_sky(planet: &Planet, stars: &[Star], time: f64) {
-    let w = screen_width();
-    let h = screen_height();
+    let w = 800.0;
+    let h = 700.0;
     let horizon = h * 0.76;
     let phase = -std::f64::consts::FRAC_PI_2 + time * std::f64::consts::TAU / 60.0;
     let coordinates: Vec<_> = stars
@@ -473,6 +473,86 @@ fn draw_lagrange_points(points: &[LagrangePoint], primary: &Star, secondary: &St
     }
 }
 
+// 恒星・惑星・ラグランジュ点を収める自動縮尺。惑星が遠くへ飛んでも追跡できる。
+fn draw_observer_overview(planet: &Planet, stars: &[Star], time: f64) {
+    let points = LagrangePointFactory::create(&stars[0], &stars[1]);
+    let mut min = vec2(planet.position.x as f32, planet.position.y as f32);
+    let mut max = min;
+    for position in stars
+        .iter()
+        .map(|s| s.position)
+        .chain(points.iter().map(|p| p.position))
+    {
+        let p = vec2(position.x as f32, position.y as f32);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    let span = max - min;
+    let scale = (660.0 / span.x.max(1.0))
+        .min(480.0 / span.y.max(1.0))
+        .min(1.5);
+    let center = (min + max) * 0.5;
+    let project = |p: Vector3<f64>| {
+        let xy = (vec2(p.x as f32, p.y as f32) - center) * scale + vec2(400.0, 340.0);
+        Vector3::new(xy.x as f64, xy.y as f64, 0.0)
+    };
+    let projected: Vec<_> = stars
+        .iter()
+        .map(|star| Star {
+            position: project(star.position),
+            mass: star.mass,
+            velocity: star.velocity,
+            radius: star.radius,
+            color: star.color,
+        })
+        .collect();
+    let projected_points: Vec<_> = points
+        .iter()
+        .map(|p| LagrangePoint {
+            name: p.name,
+            position: project(p.position),
+        })
+        .collect();
+    draw_lagrange_points(&projected_points, &projected[0], &projected[1]);
+    draw_stars(&projected);
+    let p = project(planet.position);
+    draw_planet(&Planet {
+        position: p,
+        velocity: planet.velocity,
+    });
+    let center = vec2(p.x as f32, p.y as f32);
+    let phase = -std::f64::consts::FRAC_PI_2 + time * std::f64::consts::TAU / 60.0;
+    let up = vec2(phase.cos() as f32, phase.sin() as f32);
+    // 白点は地表の観測者（位置を拡大表示）。矢印は地上の天頂のXY投影。
+    let observer = center + up * 12.0;
+    let tip = center + up * 48.0;
+    let side = vec2(-up.y, up.x);
+    draw_circle(observer.x, observer.y, 4.0, WHITE);
+    draw_line(observer.x, observer.y, tip.x, tip.y, 2.0, WHITE);
+    draw_triangle(
+        tip,
+        tip - up * 10.0 + side * 5.0,
+        tip - up * 10.0 - side * 5.0,
+        WHITE,
+    );
+    draw_text("YOU", center.x + 18.0, center.y + 25.0, 22.0, WHITE);
+    draw_text("ORBIT / observer location", 20.0, 35.0, 24.0, WHITE);
+    draw_text(
+        "Blue: planet  White dot: observer (enlarged)",
+        20.0,
+        650.0,
+        20.0,
+        LIGHTGRAY,
+    );
+    draw_text(
+        "Arrow: local zenith projected onto orbit plane",
+        20.0,
+        678.0,
+        20.0,
+        LIGHTGRAY,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,7 +591,13 @@ async fn main() {
     let mut simulation_time = 0.0;
     let mut accumulator = 0.0;
     let mut boost: f64 = 8.0;
-    let mut overview = false;
+    // 独立した描画先に描いてから並べるため、パネル間ではみ出さない。
+    let orbit_target = render_target(800, 700);
+    let ground_target = render_target(800, 700);
+    let panel_camera = |target: RenderTarget| Camera2D {
+        render_target: Some(target),
+        ..Camera2D::from_display_rect(Rect::new(0.0, 0.0, 800.0, 700.0))
+    };
 
     loop {
         // 数字キー1〜9と0（10番）で、その場で別の初期値へリセットできる。
@@ -542,9 +628,6 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::Down) {
             boost = (boost / 2.0).max(2.0);
-        }
-        if is_key_pressed(KeyCode::Tab) {
-            overview = !overview;
         }
         let speed = if is_key_down(KeyCode::Space) {
             boost
@@ -584,18 +667,35 @@ async fn main() {
                 }
                 update_planet(&mut planet, &preset.stars, sub_dt);
             }
-
-            // 描画
-            draw_stars(&preset.stars);
-            draw_planet(&planet);
-            // 先頭2つの星を主星として、現在位置からL1〜L5を表示する。
-            let lagrange_points = LagrangePointFactory::create(&preset.stars[0], &preset.stars[1]);
-            draw_lagrange_points(&lagrange_points, &preset.stars[0], &preset.stars[1]);
         }
 
-        if !overview {
-            draw_ground_sky(&planet, &preset.stars, simulation_time);
+        set_camera(&panel_camera(orbit_target.clone()));
+        clear_background(Color::new(0.015, 0.02, 0.04, 1.0));
+        draw_observer_overview(&planet, &preset.stars, simulation_time);
+        set_camera(&panel_camera(ground_target.clone()));
+        clear_background(BLACK);
+        draw_ground_sky(&planet, &preset.stars, simulation_time);
+        draw_text("GROUND / 360-degree panorama", 20.0, 35.0, 24.0, WHITE);
+        set_default_camera();
+        let split = screen_width() * 0.45;
+        let height = (screen_height() - 84.0).max(1.0);
+        for (target, x, width) in [
+            (&orbit_target, 0.0, split),
+            (&ground_target, split, screen_width() - split),
+        ] {
+            draw_texture_ex(
+                &target.texture,
+                x,
+                84.0,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(width, height)),
+                    flip_y: true,
+                    ..Default::default()
+                },
+            );
         }
+        draw_line(split, 84.0, split, screen_height(), 2.0, GRAY);
         draw_rectangle(
             0.0,
             0.0,
@@ -605,7 +705,7 @@ async fn main() {
         );
         draw_text(
             &format!(
-                "SPACE: hold to speed up | UP/DOWN: boost {:.0}x | TAB: ground / orbit | {:.0}x  t={:.1}s",
+                "SPACE: hold to speed up | UP/DOWN: boost {:.0}x | {:.0}x  t={:.1}s",
                 boost, speed, simulation_time
             ),
             10.0,
