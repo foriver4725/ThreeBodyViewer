@@ -355,11 +355,19 @@ fn horizontal_coordinates(direction: Vector3<f64>, phase: f64) -> (f64, f64) {
 }
 
 // 小説をモチーフにした視覚演出であり、実際の恒星大気の物理モデルではない。
-// 半径の30倍より遠方では飛星、12倍以内では気体層を持つ太陽として見せる。
-// smoothstepで透明度を連続的につなぎ、境界での点滅を防ぐ。
+// 半径の21倍を境に、飛星から気体層を持つ球へ瞬時に切り替える。
+// 境界の前後で混ぜないことが、この演出の要点。
 fn gas_visibility(distance: f64, radius: f64) -> f32 {
-    let t = ((30.0 - distance / radius.max(1.0)) / 18.0).clamp(0.0, 1.0) as f32;
-    t * t * (3.0 - 2.0 * t)
+    if distance <= radius.max(1.0) * 21.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+// 描画先の縮小率を補正し、実際のパネル上で半径4px以上の飛星を保証する。
+fn flying_star_radius(panel_scale: f32) -> f32 {
+    4.0 / panel_scale.max(0.01)
 }
 
 fn draw_stellar_appearance(x: f32, y: f32, radius: f32, gas: f32, color: Color, time: f64) {
@@ -398,12 +406,15 @@ fn draw_stellar_appearance(x: f32, y: f32, radius: f32, gas: f32, color: Color, 
     // 遠方では球面を描かず、小さな点光源と細い光条で「飛星」を表現する。
     // 光条は気体層ではなく見え方の演出。位置の運動は元の軌道計算を使う。
     let point = 1.0 - gas;
+    let panel_scale =
+        (screen_width() * 0.55 / 800.0).min((screen_height() - 84.0).max(1.0) / 700.0);
+    let point_radius = flying_star_radius(panel_scale);
     let shimmer = 1.0 + 0.12 * (time as f32 * 5.0 + color.g * 7.0).sin();
-    let length = 7.0 * shimmer;
+    let length = point_radius * 2.5 * shimmer;
     draw_circle(
         x,
         y,
-        5.0,
+        point_radius * 2.0,
         Color::new(color.r, color.g, color.b, point * 0.12),
     );
     draw_line(
@@ -422,7 +433,8 @@ fn draw_stellar_appearance(x: f32, y: f32, radius: f32, gas: f32, color: Color, 
         1.0,
         Color::new(color.r, color.g, color.b, point * 0.8),
     );
-    draw_circle(x, y, 1.8 * shimmer, Color::new(1.0, 0.98, 0.9, point));
+    // 中心の大きさと不透明度はまたたきで変えず、視認性を維持する。
+    draw_circle(x, y, point_radius, Color::new(1.0, 0.98, 0.9, point));
 }
 
 // 地上から周囲360度を見渡したパノラマ。地平線より下の恒星は地面で隠す。
@@ -705,12 +717,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gas_layer_fades_in_continuously_on_approach() {
-        assert_eq!(gas_visibility(600.0, 16.0), 0.0);
-        assert_eq!(gas_visibility(192.0, 16.0), 1.0);
-        assert!((gas_visibility(336.0, 16.0) - 0.5).abs() < 1.0e-6);
-        assert!(gas_visibility(300.0, 16.0) > gas_visibility(400.0, 16.0));
-        assert!((gas_visibility(479.99, 16.0) - gas_visibility(480.01, 16.0)).abs() < 1.0e-5);
+    fn gas_layer_switches_abruptly_at_boundary() {
+        assert_eq!(gas_visibility(336.01, 16.0), 0.0);
+        assert_eq!(gas_visibility(336.0, 16.0), 1.0);
+        assert_eq!(gas_visibility(335.99, 16.0), 1.0);
+    }
+
+    #[test]
+    fn flying_star_keeps_four_pixel_radius_after_scaling() {
+        for scale in [0.25, 0.5, 1.0, 2.0] {
+            assert!((flying_star_radius(scale) * scale - 4.0).abs() < 1.0e-6);
+        }
     }
 
     #[test]
