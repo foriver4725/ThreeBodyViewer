@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ThreeBodyViewer</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #03050a; color: white; }
+    canvas { width: 100%; height: 100%; display: block; outline: none; }
+    #status { position: fixed; inset: 45% 10% auto; text-align: center; font: 18px sans-serif; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas" tabindex="0" aria-label="三体シミュレーション。数字1〜9と0でプリセット切替、スペース長押しで早送り、上下キーで倍率調整。"></canvas>
+  <div id="status" role="status">三体シミュレーションを読み込み中…</div>
+  <script src="mq_js_bundle.js"></script>
+  <script>
+    const canvas = document.getElementById('glcanvas');
+    const status = document.getElementById('status');
+    window.addEventListener('error', () => { status.textContent = '起動に失敗しました。再読み込みをお試しください。'; });
+    window.addEventListener('unhandledrejection', () => { status.textContent = '読み込みに失敗しました。HTTPサーバー経由で開いてください。'; });
+    // ゲーム操作でページがスクロールするのを防ぐ。
+    canvas.addEventListener('keydown', event => {
+      if (['Space', 'ArrowUp', 'ArrowDown'].includes(event.code)) event.preventDefault();
+    });
+    canvas.addEventListener('pointerdown', () => canvas.focus());
+    canvas.focus();
+    if (typeof load === 'function') {
+      status.textContent = '';
+      load('ThreeBodyViewer.wasm');
+    } else {
+      status.textContent = '描画ランタイムが見つかりません。Web版を再ビルドしてください。';
+    }
+  </script>
+</body>
+</html>
